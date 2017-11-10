@@ -1,0 +1,198 @@
+---
+title: "Rgronomist_nlme"
+author: "Rafael Martinez-Feria"
+date: "11/10/2017"
+output: html_document
+---
+
+## Fitting non-linear mixed effects models using `nlme` package. 
+
+I will be following the approach described by [Archontoulis and Miguez (2015)](https://dl.sciencesocieties.org/publications/aj/articles/107/2/786)
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(nlme) # for curve 
+library(ggplot2) # for nice plotting 
+```
+
+We will be working with the Oats data set included in the nlme package. 
+
+```{r}
+oats <- as.data.frame(nlme::Oats)
+```
+
+From the `nlme` documentation:
+
+> These data have been introduced by Yates (1935) as an example of a split-plot design. The treatment structure used in the experiment was a 3 x 4 full factorial, with three varieties of oats and four concentrations of nitrogen. The experimental units were arranged into six blocks, each with three whole-plots subdivided into four subplots. The varieties of oats were assigned randomly to the whole-plots and the concentrations of nitrogen to the subplots. All four concentrations of nitrogen were used on each whole-plot.
+
+```{r}
+# I don't like the units so I convert to kg/ha
+oats$nitro <- round(oats$nitro*100*1.12,0)
+oats$yield <- oats$yield*32*1.12
+```
+
+We need to save as `groupedData()` to help us during the fitting process
+
+```{r}
+oats <- groupedData(yield ~ nitro | Block,
+                    data = oats, 
+                    units = list(x = "N rate (kg/ha)",
+                                 y = "Yield (kg/ha)"))
+
+plot(oats) # vizualize data 
+```
+
+## A word about mixed-effect models
+
+How is a mixed model different than a linear fixed model?
+
+```{r}
+# Fit simple linear model without random effects
+fit.lm <- lm(yield~Variety*nitro, data = oats)
+anova(fit.lm)
+```
+
+```{r}
+summary(fit.lm)
+```
+
+```{r}
+coefficients(fit.lm)
+```
+
+In a mixed model we use the grouping structure of the data (here being the split-plot) to assing a random effect (here being the plot).
+
+```{r}
+# Fit a linear mixed-effects model with subplot as a random effect
+fit.lme <- lme(yield~Variety*nitro, random = ~1|Block/Variety,# why not random = ~1|Block/Variety/nitro?
+               data = oats)  
+anova(fit.lme)
+```
+
+```{r}
+summary(fit.lme)
+```
+
+
+```{r}
+coefficients(fit.lme)
+```
+
+```{r}
+expand.grid(Block = unique(oats$Block),
+            Variety = unique(oats$Variety),
+            nitro = 1:70) -> newOats
+
+newOats$predict <- predict(fit.lme, newdata = newOats)
+newOats <- merge(newOats, data.frame(oats),all = T)
+
+ggplot(newOats,
+       aes(y= predict, x = nitro, colour = Variety)) +
+  geom_line() + 
+  geom_point(aes(y=yield)) + 
+  facet_wrap(~Block, ncol = 3) + 
+  theme(legend.position = "top")
+```
+```{r}
+ggplot(newOats,
+       aes(y= predict, x = nitro, colour = Block)) +
+  geom_line() + 
+  geom_point(aes(y=yield)) + 
+  facet_grid(.~Variety)
+```
+
+## Why a non-linear model? 
+
+Many biological processes are not linear. For intance, can we expect for yield
+to increase linearly with N fertilizer indefinitively?
+
+**Non-linear hypothesis:** There is a level where N that no longer increases yield.
+
+Here we use a linear plateau model: 
+```{r}
+linearPlateau <- function(x,a,b,c) a + b * (x - c) * (x <= c)
+```
+
+The nlsList function uses the group data estrcuture to fit a curve for each group (i.e. block)
+
+```{r}
+fit.nls <- nlsList(yield ~ linearPlateau(nitro,a,b,c),
+                   start = list(a = 30, b = 50, c = 60),
+                   data = oats)
+
+summary(fit.nls)
+```
+```{r}
+plot(fit.nls)
+```
+
+Now we define our random effects on the model parameters. Here nlme knows the data structure we passed as groupedData() so it knows the random effect is the block. 
+
+
+```{r}
+fit.nlme <- nlme(fit.nls, random = pdDiag(a + b + c ~ 1))
+plot(ranef(fit.nlme))
+
+```
+
+```{r}
+random.effects(fit.nlme) # look at the scale for b and c
+```
+
+```{r}
+anova(fit.nlme)
+```
+
+```{r}
+coef(fit.nlme)
+```
+
+```{r}
+(fe <- fixed.effects(fit.nlme))
+```
+
+Now we can ask: Is there an effect of variety?
+```{r}
+update(fit.nlme, 
+       fixed = list(a + b + c ~ Variety),
+       start = c(fe[1],5,5, #Here is where you'll spend most of the time
+                 fe[2],0,0,
+                 fe[3],0,0)) -> fit.nlme2
+
+anova(fit.nlme2)
+
+```
+
+```{r}
+coef(fit.nlme2)
+```
+
+```{r}
+plot(augPred(fit.nlme2,level = c(0,1)))
+```
+
+# Final plot 
+```{r}
+expand.grid(Block = unique(oats$Block),
+            Variety = unique(oats$Variety),
+            nitro = 1:70) -> newOats
+
+newOats$predict <- predict(fit.nlme, newdata = newOats)
+newOats <- merge(newOats, data.frame(oats),all = T)
+
+ggplot(newOats,
+       aes(y= predict, x = nitro, colour = Variety)) +
+  geom_line() + 
+  geom_point(aes(y=yield)) + 
+  facet_wrap(~Block,ncol = 3)
+
+```
+
+
+```{r}
+ggplot(newOats,
+       aes(y= predict, x = nitro, colour = Block)) +
+  geom_line() + 
+  geom_point(aes(y=yield)) + 
+  facet_grid(.~Variety)
+```
